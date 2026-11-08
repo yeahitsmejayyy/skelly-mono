@@ -247,3 +247,33 @@ test("with no portal mounted the site is the extraction source", () => {
   const move = p.ops.find((o) => o.kind === "moveFile");
   expect(move!.kind === "moveFile" && move!.from).toBe("apps/site/src/lib/utils.ts");
 });
+
+// ── Determinism: the dry run is a diffable artefact ──
+// Clockwork gates its scaffold station on diffing `--dry-run` output, so byte stability is a
+// contract, not a nicety. The planner being pure is what makes this hold; these tests are what
+// stop a later change from quietly breaking it.
+
+test("the same answers render byte-identical preview text, every time", () => {
+  const renders = new Set<string>();
+  for (let i = 0; i < 50; i++) renders.add(preview(plan(FOUR, M), FOUR));
+  expect(renders.size).toBe(1);
+});
+
+test("the plan itself is structurally identical across calls", () => {
+  expect(plan(FOUR, M)).toEqual(plan(FOUR, M));
+});
+
+test("instance declaration order is the only thing that reorders the ops", () => {
+  const a = plan(SITE_FIRST, M);
+  const b = plan({ ...SITE_FIRST, instances: [...SITE_FIRST.instances] }, M);
+  expect(JSON.stringify(a.ops)).toBe(JSON.stringify(b.ops));
+});
+
+test("the preview embeds no absolute path, so it is diffable across machines", () => {
+  const text = preview(plan(FOUR, M), FOUR);
+  expect(text).not.toContain("/Users/");
+  expect(text).not.toContain("/private/");
+  expect(text).not.toContain(process.cwd());
+  // every path in the preview is repo-relative
+  for (const line of text.split("\n")) expect(line.trimStart().startsWith("/")).toBe(false);
+});

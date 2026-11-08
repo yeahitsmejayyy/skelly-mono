@@ -1,0 +1,16 @@
+{
+  "name": "skelly-mono",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "typecheck": "bun scripts/typecheck.ts",
+    "test": "bun test",
+    "sync:types": "bun scripts/sync-types.ts",
+    "mount": "bun scripts/mount.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "~5.9.3"
+  }
+}

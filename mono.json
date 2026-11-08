@@ -1,0 +1,97 @@
+{
+  "containers": [
+    {
+      "id": "server",
+      "summary": "Local-first Bun + SQLite backend, typed end to end with tRPC.",
+      "repo": "https://github.com/yeahitsmejayyy/skelly-backend",
+      "defaultDir": "server",
+      "role": "backend",
+      "multiple": false,
+      "pkg": "@app/{{dir}}",
+      "contractSource": true,
+      "run": "bun run dev",
+      "rename": [
+        { "file": "package.json", "from": "@skelly/backend", "to": "@app/{{dir}}" },
+        { "file": "src/db/client.ts", "from": "skelly.db", "to": "{{slug}}.db" },
+        { "file": "src/db/client.ts", "from": "@skelly/backend", "to": "@app/{{dir}}" },
+        { "file": "src/routes/healthCheck.ts", "from": "skelly backend", "to": "{{slug}} backend" },
+        { "file": "src/trpc.ts", "from": "skelly-portal", "to": "the portal" },
+        { "file": "scripts/emit-types.ts", "from": "skelly-portal", "to": "the portal" }
+      ],
+      "rewrite": [
+        {
+          "file": "tsconfig.json",
+          "content": "{ \"extends\": \"../../tsconfig.base.json\", \"include\": [\"src\"] }\n"
+        }
+      ],
+      "purge": ["README.md", "SECURITY.md", "ARCHITECTURE.md", "image.png", "LICENSE", "bun.lock"],
+      "appScriptsDrop": [],
+      "rootScripts": {
+        "dev": "bun --filter @app/{{dir}} dev",
+        "start": "bun --filter @app/{{dir}} start"
+      },
+      "demo": [
+        {
+          "path": "src/db/schema.sql",
+          "note": "Ships an EXAMPLE TABLE `skelly_meta` and a Skelly header comment. Reference material — replace it when you write your real schema."
+        }
+      ]
+    },
+    {
+      "id": "portal",
+      "summary": "Vite + React portal, typed against the backend over tRPC.",
+      "repo": "https://github.com/yeahitsmejayyy/skelly-portal",
+      "defaultDir": "portal",
+      "role": "frontend",
+      "multiple": true,
+      "pkg": "@app/{{dir}}",
+      "contractTarget": true,
+      "run": "bun run dev:{{dir}}",
+      "rename": [
+        { "file": "package.json", "from": "@skelly/frontend", "to": "@app/{{dir}}" },
+        { "file": "index.html", "from": "@skelly/portal", "to": "@app/{{dir}}" },
+        { "file": "src/components/layout/app-nav.tsx", "from": "skelly-portal", "to": "{{slug}}" },
+        { "file": "src/components/layout/app-nav.tsx", "from": "username=\"yeahitsmejayyy\"", "to": "username=\"{{slug}}\"" },
+        { "file": "src/components/layout/app-nav.tsx", "from": "email=\"hello@itsjayyy.com\"", "to": "email=\"you@example.com\"" },
+        { "file": "src/components/layout/app-nav.tsx", "from": "avatarSrc=\"/avatar.png\"", "to": "avatarSrc=\"\"" },
+        { "file": "src/lib/app-router.d.ts", "from": "skelly-backend's", "to": "the backend's" }
+      ],
+      "rewrite": [],
+      "purge": [
+        "README.md", "SECURITY.md", "ARCHITECTURE.md", "image.png", "LICENSE",
+        "public/avatar.png", "bun.lock", "scripts/sync-types.ts"
+      ],
+      "appScriptsDrop": ["sync:types"],
+      "rootScripts": { "dev:{{dir}}": "bun --filter @app/{{dir}} dev" },
+      "demo": []
+    },
+    {
+      "id": "site",
+      "summary": "Vite + React marketing site skeleton, fourteen sections behind a typed registry.",
+      "repo": "https://github.com/yeahitsmejayyy/skelly-site",
+      "defaultDir": "site",
+      "role": "frontend",
+      "multiple": true,
+      "pkg": "@app/{{dir}}",
+      "run": "bun run dev:{{dir}}",
+      "rename": [
+        { "file": "package.json", "from": "@skelly/site", "to": "@app/{{dir}}" },
+        { "file": "src/components/default.tsx", "from": "skelly-site", "to": "{{slug}}" }
+      ],
+      "rewrite": [],
+      "purge": ["README.md", "SECURITY.md", "ARCHITECTURE.md", "image.png", "LICENSE", "bun.lock"],
+      "appScriptsDrop": [],
+      "rootScripts": { "dev:{{dir}}": "bun --filter @app/{{dir}} dev" },
+      "demo": [
+        {
+          "path": "src/seo/seo-defaults.tsx",
+          "note": "Ships Skelly's meta description. MUST be edited before shipping — this is what search engines index."
+        },
+        {
+          "path": "src/routes/home.tsx",
+          "note": "~590 lines of Skelly marketing copy, including a `Copyright 2026 skellyui.com` footer. This is the demo landing page you hack on."
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 // Pure. No fs, no network, no clock, no randomness — that is what makes --dry-run honest and the
 // tests free. Anything that must read a file is an Op for apply.ts to resolve.
-import type { Answers, Container, Instance, Manifest, MountPlan, Op } from "./types";
+import type { Answers, Container, Demo, Instance, Manifest, MountPlan, Op } from "./types";
 import { MountError } from "./types";
 
 const SAFE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
@@ -15,6 +15,7 @@ const SHELL_PURGE = ["README.md", "SECURITY.md", "image.png", "LICENSE", "apps/.
 export function plan(answers: Answers, manifest: Manifest): MountPlan {
   const ops: Op[] = [];
   const warnings: string[] = [];
+  const demos: Demo[] = [];
   const byId = new Map(manifest.containers.map((c) => [c.id, c]));
 
   if (!SAFE.test(answers.slug)) throw new MountError(`unsafe slug: ${answers.slug}`);
@@ -70,6 +71,7 @@ export function plan(answers: Answers, manifest: Manifest): MountPlan {
         value: substitute(body, vars),
       });
     }
+    for (const d of c.demo) demos.push({ path: `${root}/${d.path}`, note: d.note });
     if (c.role === "frontend") frontends.push(inst);
   }
 
@@ -115,7 +117,7 @@ export function plan(answers: Answers, manifest: Manifest): MountPlan {
     ops.push(...designSystemOps(answers, frontends, manifest));
   }
 
-  return { ops, warnings, tree: treeOf(answers, byId) };
+  return { ops, warnings, tree: treeOf(answers, byId), demos };
 }
 
 function designSystemOps(answers: Answers, frontends: Instance[], m: Manifest): Op[] {

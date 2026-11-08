@@ -66,6 +66,8 @@ export type Op =
   | { kind: "splitCss"; source: string; theme: string; tokens: string; themeHolds: string[]; tokensHolds: string[] }
   | { kind: "importRewrite"; dir: string; from: string; to: string };
 
-export type MountPlan = { ops: Op[]; warnings: string[]; tree: string[] };
+// `demos` is category C: content the templates ship on purpose, which the mount leaves alone
+// and the preview must say out loud. Paths are relative to the monorepo root, not the template.
+export type MountPlan = { ops: Op[]; warnings: string[]; tree: string[]; demos: Demo[] };
 
 export class MountError extends Error {}

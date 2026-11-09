@@ -182,9 +182,16 @@ function designSystemOps(answers: Answers, frontends: Instance[], m: Manifest): 
 
 function treeOf(answers: Answers, byId: Map<string, Container>): string[] {
   const lines = [`${answers.slug}/`, "├─ apps/"];
-  for (const i of answers.instances) {
-    lines.push(`│  ├─ ${i.dir}/   @app/${i.dir}   ${byId.get(i.id)!.summary}`);
-  }
+  // Columns are padded to the widest entry so the summaries line up, and the last app gets the
+  // closing elbow. A tree that draws itself wrong is the first thing a reader stops trusting.
+  const dirW = Math.max(...answers.instances.map((i) => i.dir.length));
+  const pkgW = dirW + "@app/".length;
+  answers.instances.forEach((i, n) => {
+    const elbow = n === answers.instances.length - 1 ? "└─" : "├─";
+    const dir = `${i.dir}/`.padEnd(dirW + 1);
+    const pkg = `@app/${i.dir}`.padEnd(pkgW);
+    lines.push(`│  ${elbow} ${dir}  ${pkg}  ${byId.get(i.id)!.summary}`);
+  });
   if (answers.designSystem) {
     lines.push("├─ packages/", "│  └─ ui/      @app/ui   shared components, tokens, utils");
     lines.push("├─ .storybook/");

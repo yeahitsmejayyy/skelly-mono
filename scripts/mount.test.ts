@@ -1,9 +1,14 @@
 import { expect, test } from "bun:test";
+import { $, Glob } from "bun";
+import { statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { safeJoin } from "./mount/apply";
 import { plan } from "./mount/plan";
 import { preview } from "./mount/preview";
 import { MountError } from "./mount/types";
 import manifest from "../mono.json";
-import type { Manifest } from "./mount/types";
+import type { Manifest, Op } from "./mount/types";
 
 // mono.json widens to `role: string` and a per-container union, so tsc rejects a direct cast.
 // The shape is asserted at runtime by the manifest drift guard, not here.
@@ -276,4 +281,80 @@ test("the preview embeds no absolute path, so it is diffable across machines", (
   expect(text).not.toContain(process.cwd());
   // every path in the preview is repo-relative
   for (const line of text.split("\n")) expect(line.trimStart().startsWith("/")).toBe(false);
+});
+
+// --- Task 6: the applier -----------------------------------------------------------------
+
+test("safeJoin refuses to escape the project root", () => {
+  expect(() => safeJoin("/tmp/proj", "../etc/passwd")).toThrow(MountError);
+  expect(() => safeJoin("/tmp/proj", "apps/../../x")).toThrow(MountError);
+  expect(() => safeJoin("/tmp/proj", "/etc/passwd")).toThrow(MountError);
+  expect(() => safeJoin("/tmp/proj", ".")).toThrow(MountError);
+  expect(safeJoin("/tmp/proj", "apps/server/package.json")).toBe("/tmp/proj/apps/server/package.json");
+});
+
+// Every op the planner can emit must have an applier, or the mount dies partway through a
+// directory it has already half-written. The four design-system kinds are Task 7's; this list
+// is the only place they are excused, and Task 7 empties it.
+const DEFERRED = new Set<Op["kind"]>(["extractComponents", "moveFile", "splitCss", "importRewrite"]);
+
+test("no op kind the planner emits is missing an applier", async () => {
+  const source = await Bun.file(new URL("./mount/apply.ts", import.meta.url)).text();
+  const emitted = new Set(plan(FOUR, M).ops.map((o) => o.kind));
+  const unhandled = [...emitted].filter((k) => !source.includes(`case "${k}":`)).sort();
+  expect(unhandled).toEqual([...DEFERRED].sort());
+});
+
+test("the four deferred kinds are reachable, so the list is not a dead excuse", () => {
+  const emitted = new Set(plan(FOUR, M).ops.map((o) => o.kind));
+  for (const k of DEFERRED) expect(emitted.has(k)).toBe(true);
+});
+
+// --- Task 6: the CLI ---------------------------------------------------------------------
+// The preview test above covers the rendered block. This covers the whole CLI, because the
+// flag parsing is where an absolute path leaks back in: --root is a path, and the obvious
+// implementation echoes it.
+
+const cliDryRun = async (answers: unknown) => {
+  const file = join(tmpdir(), `mount-answers-${Bun.randomUUIDv7()}.json`);
+  await Bun.write(file, JSON.stringify(answers));
+  const root = dirname(import.meta.dir);
+  const proc = Bun.spawn({
+    cmd: ["bun", join(root, "scripts/mount.ts"), "--answers", file, "--dry-run", "--root", root],
+    stdout: "pipe", stderr: "pipe",
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(), new Response(proc.stderr).text(),
+  ]);
+  return { exit: await proc.exited, stdout, stderr };
+};
+
+test("the CLI's dry run prints no absolute path, even though --root is one", async () => {
+  const { exit, stdout } = await cliDryRun(FOUR);
+  expect(exit).toBe(0);
+  expect(stdout).toContain("Nothing has been written.");
+  expect(stdout).not.toContain("/Users/");
+  expect(stdout).not.toContain("/private/");
+  expect(stdout).not.toContain(tmpdir());
+  for (const line of stdout.split("\n")) expect(line.trimStart().startsWith("/")).toBe(false);
+});
+
+test("the CLI's dry run touches nothing on disk", async () => {
+  const root = dirname(import.meta.dir);
+  const before = (await $`git status --porcelain`.cwd(root).text()).trim();
+  const mtimes = (await Array.fromAsync(new Glob("scripts/**/*.ts").scan({ cwd: root })))
+    .sort().map((f) => `${f}:${statSync(join(root, f)).mtimeMs}`);
+  await cliDryRun(FOUR);
+  const after = (await $`git status --porcelain`.cwd(root).text()).trim();
+  expect(after).toBe(before);
+  expect((await Array.fromAsync(new Glob("scripts/**/*.ts").scan({ cwd: root })))
+    .sort().map((f) => `${f}:${statSync(join(root, f)).mtimeMs}`)).toEqual(mtimes);
+});
+
+test("a bad slug fails at the CLI with a message, not a stack trace", async () => {
+  const { exit, stdout, stderr } = await cliDryRun({ ...FOUR, slug: "Not A Slug" });
+  expect(exit).toBe(1);
+  expect(stderr).toContain("✖");
+  expect(stderr).not.toContain("at ");
+  expect(stdout).not.toContain("Nothing has been written.");
 });

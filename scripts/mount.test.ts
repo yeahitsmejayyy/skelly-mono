@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { $, Glob } from "bun";
-import { statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { safeJoin } from "./mount/apply";
+import { dirname, join, resolve } from "node:path";
+import { apply, safeJoin, splitTopLevel } from "./mount/apply";
 import { plan } from "./mount/plan";
 import { preview } from "./mount/preview";
 import { MountError } from "./mount/types";
@@ -294,9 +294,9 @@ test("safeJoin refuses to escape the project root", () => {
 });
 
 // Every op the planner can emit must have an applier, or the mount dies partway through a
-// directory it has already half-written. The four design-system kinds are Task 7's; this list
-// is the only place they are excused, and Task 7 empties it.
-const DEFERRED = new Set<Op["kind"]>(["extractComponents", "moveFile", "splitCss", "importRewrite"]);
+// directory it has already half-written. Task 7 emptied this list; it is kept so the next op kind
+// added without an applier has to be excused in writing rather than discovered during a mount.
+const DEFERRED = new Set<Op["kind"]>([]);
 
 test("no op kind the planner emits is missing an applier", async () => {
   const source = await Bun.file(new URL("./mount/apply.ts", import.meta.url)).text();
@@ -305,9 +305,12 @@ test("no op kind the planner emits is missing an applier", async () => {
   expect(unhandled).toEqual([...DEFERRED].sort());
 });
 
-test("the four deferred kinds are reachable, so the list is not a dead excuse", () => {
-  const emitted = new Set(plan(FOUR, M).ops.map((o) => o.kind));
-  for (const k of DEFERRED) expect(emitted.has(k)).toBe(true);
+test("every op kind in the union is reachable from some plan, so none is dead code", () => {
+  const emitted = new Set([...plan(FOUR, M).ops, ...plan(OFF, M).ops].map((o) => o.kind));
+  for (const k of [
+    "clone", "purge", "replace", "write", "jsonSet", "jsonUnset",
+    "extractComponents", "moveFile", "splitCss", "importRewrite",
+  ] satisfies Op["kind"][]) expect(emitted.has(k)).toBe(true);
 });
 
 // --- Task 6: the CLI ---------------------------------------------------------------------
@@ -357,4 +360,180 @@ test("a bad slug fails at the CLI with a message, not a stack trace", async () =
   expect(stderr).toContain("✖");
   expect(stderr).not.toContain("at ");
   expect(stdout).not.toContain("Nothing has been written.");
+});
+
+// --- Task 7: the design system -----------------------------------------------------------
+
+test("the design system writes its package, its rig and its seed stories", () => {
+  const written = plan(FOUR, M).ops.flatMap((o) => (o.kind === "write" ? [o.file] : []));
+  for (const f of [
+    "packages/ui/package.json", "packages/ui/tsconfig.json",
+    ".storybook/main.ts", ".storybook/preview.tsx", ".storybook/storybook.css",
+    ".storybook/tsconfig.json", "vitest.config.ts",
+    "packages/ui/src/stories/button.stories.tsx",
+    "packages/ui/src/stories/tokens.stories.tsx",
+    "packages/ui/src/principles.mdx",
+  ]) expect(written).toContain(f);
+});
+
+test("the design system writes none of those files when it is off", () => {
+  const written = plan(OFF, M).ops.flatMap((o) => (o.kind === "write" ? [o.file] : []));
+  for (const f of written) {
+    expect(f.startsWith("packages/")).toBe(false);
+    expect(f.startsWith(".storybook/")).toBe(false);
+  }
+  expect(written).not.toContain("vitest.config.ts");
+});
+
+// packages/ui's dependencies and the deps unset from each frontend both come from depMoves, so
+// the two cannot drift apart. This asserts the wiring, not the list.
+test("every dep moved off a frontend arrives in packages/ui", () => {
+  const p = plan(FOUR, M);
+  const pkg = p.ops.find((o) => o.kind === "write" && o.file === "packages/ui/package.json");
+  expect(pkg?.kind).toBe("write");
+  const deps = JSON.parse((pkg as { content: string }).content).dependencies as Record<string, string>;
+  const unset = p.ops.flatMap((o) =>
+    o.kind === "jsonUnset" && o.path[0] === "dependencies" ? [o.path[1]!] : [],
+  );
+  expect(unset.length).toBeGreaterThan(0);
+  for (const d of new Set(unset)) expect(Object.keys(deps)).toContain(d);
+});
+
+test("a seed story named in mono.json with no body is a MountError, not a silent skip", () => {
+  const broken = { ...M, designSystem: { ...M.designSystem, seedStories: ["nope.stories.tsx"] } };
+  expect(() => plan(FOUR, broken)).toThrow(MountError);
+});
+
+// A published skelly-mono has no sibling template checkout, so this skips rather than fails when
+// none is present. It is a development-time guard, not a release gate. Both frontend templates are
+// checked, because splitCss reads whichever frontend is declared first — with no portal, the site.
+// The local checkout of the portal template is in a directory still called skelly-admin.
+const SIBLINGS = ["skelly-admin", "skelly-portal", "skelly-site"]
+  .map((d) => resolve(dirname(import.meta.dir), "..", d, "src/index.css"))
+  .filter((f) => existsSync(f));
+
+test.skipIf(SIBLINGS.length === 0)(
+  "splitTopLevel routes every block of the templates' index.css to theme or tokens",
+  async () => {
+    const { themeHolds, tokensHolds } = M.designSystem.cssSplit;
+    for (const file of SIBLINGS) {
+      const blocks = splitTopLevel(await Bun.file(file).text());
+      const claims = (holds: string[], b: string) => holds.some((h) => b.startsWith(h));
+      for (const h of [...themeHolds, ...tokensHolds]) {
+        expect(blocks.some((b) => b.startsWith(h))).toBe(true);
+      }
+      // A block claimed by neither would vanish from both outputs. @import is expected to go: the
+      // per-app index.css is rewritten with its own imports.
+      const unclaimed = blocks.filter(
+        (b) => !claims(themeHolds, b) && !claims(tokensHolds, b) && !b.startsWith("@import"),
+      );
+      expect({ file, unclaimed }).toEqual({ file, unclaimed: [] });
+    }
+  },
+);
+
+// --- Task 7: the appliers, executed for real ----------------------------------------------
+// Everything above this point tests the planner, which never touches disk. These run apply()
+// against a throwaway tree, because portal-wins and the drift report are only true if the code
+// that moves bytes behaves the way the plan says it does.
+
+const sandbox = () => {
+  const root = join(tmpdir(), `mount-apply-${Bun.randomUUIDv7()}`);
+  mkdirSync(root, { recursive: true });
+  return root;
+};
+
+test("extractComponents keeps the first source's copy and names the dropped one", async () => {
+  const root = sandbox();
+  await Bun.write(join(root, "apps/portal/src/components/ui/button.tsx"), "PORTAL BUTTON\n");
+  await Bun.write(join(root, "apps/portal/src/components/ui/card.tsx"), "SHARED CARD\n");
+  await Bun.write(join(root, "apps/site/src/components/ui/button.tsx"), "SITE BUTTON\n");
+  await Bun.write(join(root, "apps/site/src/components/ui/card.tsx"), "SHARED CARD\n");
+
+  const report = await apply([{
+    kind: "extractComponents",
+    components: ["button.tsx", "card.tsx"],
+    sources: ["apps/portal/src/components/ui", "apps/site/src/components/ui"],
+    to: "packages/ui/src/components",
+    policy: "portal-wins",
+  }], root);
+
+  // The portal is first, so its button survives and the site's is reported, not silently lost.
+  expect(await Bun.file(join(root, "packages/ui/src/components/button.tsx")).text()).toBe("PORTAL BUTTON\n");
+  expect(report.conflicts).toEqual([{
+    file: "button.tsx",
+    kept: "apps/portal/src/components/ui",
+    dropped: "apps/site/src/components/ui",
+  }]);
+  // card.tsx is byte-identical in both, so it is not a conflict.
+  expect(report.conflicts.map((c) => c.file)).not.toContain("card.tsx");
+  expect(report.notFound).toEqual([]);
+});
+
+test("extractComponents reports a component the manifest does not name, and one it names in vain", async () => {
+  const root = sandbox();
+  await Bun.write(join(root, "apps/portal/src/components/ui/button.tsx"), "B\n");
+  await Bun.write(join(root, "apps/portal/src/components/ui/surprise.tsx"), "NEW\n");
+
+  const report = await apply([{
+    kind: "extractComponents",
+    components: ["button.tsx", "absent.tsx"],
+    sources: ["apps/portal/src/components/ui"],
+    to: "packages/ui/src/components",
+    policy: "portal-wins",
+  }], root);
+
+  expect(existsSync(join(root, "packages/ui/src/components/surprise.tsx"))).toBe(false);
+  expect(report.notFound.join("\n")).toContain("surprise.tsx (not in extract.components)");
+  expect(report.notFound.join("\n")).toContain("absent.tsx (named in extract.components");
+});
+
+test("splitCss routes each block to one file and loses nothing", async () => {
+  const root = sandbox();
+  await Bun.write(join(root, "apps/portal/src/index.css"), [
+    '@import "tailwindcss";',
+    "@custom-variant dark (&:is(.dark *));",
+    "@theme inline {\n  --color-background: var(--background);\n}",
+    ":root {\n  --background: white;\n}",
+    ".dark {\n  --background: black;\n}",
+    "@layer base {\n  body {\n    @apply bg-background;\n  }\n}",
+  ].join("\n\n") + "\n");
+
+  const report = await apply([{
+    kind: "splitCss",
+    source: "apps/portal/src/index.css",
+    theme: "packages/ui/src/theme.css",
+    tokens: "packages/ui/src/tokens.css",
+    themeHolds: ["@custom-variant dark", "@theme inline", "@layer base"],
+    tokensHolds: [":root", ".dark"],
+  }], root);
+
+  const theme = await Bun.file(join(root, "packages/ui/src/theme.css")).text();
+  const tokens = await Bun.file(join(root, "packages/ui/src/tokens.css")).text();
+  expect(theme).toContain("@custom-variant dark");
+  expect(theme).toContain("@theme inline");
+  // @layer base uses @apply, so it has to land in the file Tailwind processes, never in tokens.css
+  // — Storybook's preview.tsx imports tokens.css as plain CSS.
+  expect(theme).toContain("@layer base");
+  expect(tokens).toContain(":root");
+  expect(tokens).toContain(".dark");
+  expect(tokens).not.toContain("@apply");
+  expect(report.notFound).toEqual([]);
+});
+
+test("splitCss reports a block that mono.json routes nowhere instead of dropping it", async () => {
+  const root = sandbox();
+  await Bun.write(join(root, "a.css"), ":root {\n  --x: 1;\n}\n\n@layer base {\n  body { color: red; }\n}\n");
+  const report = await apply([{
+    kind: "splitCss", source: "a.css",
+    theme: "t.css", tokens: "k.css",
+    themeHolds: [], tokensHolds: [":root"],
+  }], root);
+  expect(report.notFound.join("\n")).toContain("unclaimed CSS block");
+  expect(report.notFound.join("\n")).toContain("@layer base");
+});
+
+test("an op whose path escapes the root aborts the mount rather than writing outside it", async () => {
+  const root = sandbox();
+  await expect(apply([{ kind: "purge", path: "../../etc/hosts" }], root)).rejects.toThrow(MountError);
 });

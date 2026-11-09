@@ -72,4 +72,9 @@ if (report.notFound.length) {
   for (const n of report.notFound) console.log(`  - ${n}`);
   console.log("  The templates have drifted from mono.json. Report this; do not fix it silently.");
 }
+if (report.conflicts.length) {
+  console.log("\n⚠ divergent duplicates — the portal's copy was kept:");
+  for (const c of report.conflicts) console.log(`  - ${c.file}: kept ${c.kept}, dropped ${c.dropped}`);
+  console.log("  Diff them before trusting the result. The dropped app may lose behaviour.");
+}
 for (const w of compiled.warnings) console.log(`! ${w}`);

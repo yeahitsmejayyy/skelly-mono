@@ -60,8 +60,8 @@ export type Op =
   | { kind: "write"; file: string; content: string }
   | { kind: "jsonSet"; file: string; path: string[]; value: unknown }
   | { kind: "jsonUnset"; file: string; path: string[] }
-  // Design-system effects. Task 7 adds their appliers.
-  | { kind: "extractComponents"; sources: string[]; to: string; policy: "portal-wins" }
+  // Design-system effects, applied only when answers.designSystem is true.
+  | { kind: "extractComponents"; components: string[]; sources: string[]; to: string; policy: "portal-wins" }
   | { kind: "moveFile"; from: string; to: string }
   | { kind: "splitCss"; source: string; theme: string; tokens: string; themeHolds: string[]; tokensHolds: string[] }
   | { kind: "importRewrite"; dir: string; from: string; to: string };

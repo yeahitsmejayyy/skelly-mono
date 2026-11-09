@@ -1,7 +1,12 @@
 // Pure. No fs, no network, no clock, no randomness — that is what makes --dry-run honest and the
 // tests free. Anything that must read a file is an Op for apply.ts to resolve.
-import type { Answers, Container, Demo, Instance, Manifest, MountPlan, Op } from "./types";
 import { MountError } from "./types";
+import type { Answers, Container, Demo, Instance, Manifest, MountPlan, Op } from "./types";
+import {
+  BUTTON_STORIES, PRINCIPLES_MDX, STORYBOOK_CSS, STORYBOOK_MAIN, STORYBOOK_PREVIEW,
+  STORYBOOK_TSCONFIG, TOKENS_STORIES, UI_TSCONFIG, VITEST_CONFIG,
+} from "./files";
+
 
 const SAFE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
@@ -128,6 +133,9 @@ function designSystemOps(answers: Answers, frontends: Instance[], m: Manifest): 
 
   ops.push({
     kind: "extractComponents",
+    // The manifest names the components, so a template that grows a nineteenth is drift the
+    // mount reports rather than silently absorbs.
+    components: ds.extract.components,
     sources: ordered.map((f) => `apps/${f.dir}/${ds.extract.from}`),
     to: ds.extract.to,
     policy: ds.conflictPolicy,
@@ -170,6 +178,45 @@ function designSystemOps(answers: Answers, frontends: Instance[], m: Manifest): 
     });
     ops.push({ kind: "purge", path: `${root}/${ds.extract.from}` });
   }
+
+  // The package itself. Its dependencies are exactly the deps moved off the frontends, so the
+  // two lists cannot drift apart: both are read from depMoves.
+  ops.push({
+    kind: "write",
+    file: `${ds.dir}/package.json`,
+    content: `${JSON.stringify({
+      name: ds.pkg,
+      private: true,
+      version: "0.0.0",
+      type: "module",
+      exports: ds.exports,
+      scripts: { typecheck: "tsc --noEmit -p ." },
+      dependencies: ds.depMoves,
+      peerDependencies: ds.peerDeps,
+      devDependencies: { "@types/react": "^19.2.5", "@types/react-dom": "^19.2.3" },
+    }, null, 2)}\n`,
+  });
+  ops.push({ kind: "write", file: `${ds.dir}/tsconfig.json`, content: UI_TSCONFIG });
+
+  // The Storybook rig. It is the only place both themes are visible side by side, which is the
+  // one thing no test in this repository can check.
+  ops.push({ kind: "write", file: ".storybook/main.ts", content: STORYBOOK_MAIN });
+  ops.push({ kind: "write", file: ".storybook/preview.tsx", content: STORYBOOK_PREVIEW });
+  ops.push({ kind: "write", file: ".storybook/storybook.css", content: STORYBOOK_CSS });
+  ops.push({ kind: "write", file: ".storybook/tsconfig.json", content: STORYBOOK_TSCONFIG });
+  ops.push({ kind: "write", file: "vitest.config.ts", content: VITEST_CONFIG });
+
+  // Seed content. mono.json's seedStories names the two story files; their bodies are literal.
+  const STORY_BODIES: Record<string, string> = {
+    "button.stories.tsx": BUTTON_STORIES,
+    "tokens.stories.tsx": TOKENS_STORIES,
+  };
+  for (const name of ds.seedStories) {
+    const content = STORY_BODIES[name];
+    if (content === undefined) throw new MountError(`no seed story body for: ${name}`);
+    ops.push({ kind: "write", file: `${ds.dir}/src/stories/${name}`, content });
+  }
+  ops.push({ kind: "write", file: `${ds.dir}/src/principles.mdx`, content: PRINCIPLES_MDX });
 
   for (const [name, body] of Object.entries(ds.rootScripts)) {
     ops.push({ kind: "jsonSet", file: "package.json", path: ["scripts", name], value: body });

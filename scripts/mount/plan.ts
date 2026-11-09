@@ -15,7 +15,19 @@ export function substitute(s: string, vars: { slug: string; dir: string }): stri
 }
 
 // Category B and D files the shell itself carries. Purged on every mount.
-const SHELL_PURGE = ["README.md", "SECURITY.md", "image.png", "LICENSE", "apps/.gitkeep"];
+const SHELL_PURGE = [
+  "README.md", "SECURITY.md", "image.png", "LICENSE", "apps/.gitkeep",
+  // The shell's lockfile describes a workspace with no members. It is stale the moment apps are
+  // mounted, and `bun install` after the mount writes the real one.
+  "bun.lock",
+];
+
+// The compiler removes itself last. mono.json lists Skelly's template repositories and the mount
+// scripts are a one-shot composition step that must never run twice — leaving them behind would
+// ship every project a copy of another project's tooling. Category B, the same judgement that
+// deletes README.md: substitute the slug, read it back, and it is not a true statement about the
+// user's project. scripts/sync-types.ts and scripts/typecheck.ts stay: those the project needs.
+const SELF_PURGE = ["mono.json", "scripts/mount.ts", "scripts/mount", "scripts/mount.test.ts"];
 
 export function plan(answers: Answers, manifest: Manifest): MountPlan {
   const ops: Op[] = [];
@@ -67,6 +79,9 @@ export function plan(answers: Answers, manifest: Manifest): MountPlan {
     }
     for (const name of c.appScriptsDrop) {
       ops.push({ kind: "jsonUnset", file: `${root}/package.json`, path: ["scripts", name] });
+    }
+    for (const [name, body] of Object.entries(c.appScriptsSet)) {
+      ops.push({ kind: "jsonSet", file: `${root}/package.json`, path: ["scripts", name], value: body });
     }
     for (const [name, body] of Object.entries(c.rootScripts)) {
       ops.push({
@@ -122,6 +137,10 @@ export function plan(answers: Answers, manifest: Manifest): MountPlan {
     ops.push(...designSystemOps(answers, frontends, manifest));
   }
 
+  for (const p of SELF_PURGE) ops.push({ kind: "purge", path: p });
+  // ...and the script that invoked it, which would otherwise point at a file that is now gone.
+  ops.push({ kind: "jsonUnset", file: "package.json", path: ["scripts", "mount"] });
+
   return { ops, warnings, tree: treeOf(answers, byId), demos };
 }
 
@@ -142,6 +161,15 @@ function designSystemOps(answers: Answers, frontends: Instance[], m: Manifest): 
   });
   for (const f of ds.extract.files) {
     ops.push({ kind: "moveFile", from: `apps/${ordered[0]!.dir}/${f.from}`, to: f.to });
+    // Every other frontend shipped its own copy. Left behind they are dead files that still
+    // import deps the mount has just taken off that app's package.json.
+    for (const other of ordered.slice(1)) {
+      ops.push({ kind: "purge", path: `apps/${other.dir}/${f.from}` });
+    }
+  }
+  // The extracted files' own imports, rewritten inside packages/ui.
+  for (const r of ds.pkgImportRewrites) {
+    ops.push({ kind: "importRewrite", dir: `${ds.dir}/src`, from: r.from, to: r.to });
   }
   ops.push({
     kind: "splitCss",
@@ -168,6 +196,7 @@ function designSystemOps(answers: Answers, frontends: Instance[], m: Manifest): 
         '@source "../../../packages/ui/src";\n',
     });
     for (const dep of Object.keys(ds.depMoves)) {
+      if (ds.depKeep.includes(dep)) continue;
       ops.push({ kind: "jsonUnset", file: `${root}/package.json`, path: ["dependencies", dep] });
     }
     ops.push({

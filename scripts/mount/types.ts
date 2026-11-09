@@ -21,6 +21,9 @@ export type Container = {
   rewrite: Rewrite[];
   purge: string[];
   appScriptsDrop: string[];
+  // Scripts the template does not ship but the monorepo's root gate needs. The server and the
+  // site have no `typecheck` of their own, so `bun run typecheck` would skip them in silence.
+  appScriptsSet: Record<string, string>;
   rootScripts: Record<string, string>;
   demo: Demo[];
   contractSource?: boolean;
@@ -44,7 +47,13 @@ export type DesignSystem = {
     themeHolds: string[]; tokensHolds: string[];
   };
   importRewrites: { from: string; to: string }[];
+  // The extracted components' own imports. They move out of the app tree, so the apps' rewrites
+  // never reach them and they need their own, relative to packages/ui/src.
+  pkgImportRewrites: { from: string; to: string }[];
   depMoves: Record<string, string>;
+  // Deps packages/ui needs that the frontends keep anyway, because their own code imports them
+  // directly. lucide-react is the case: every nav item in every app names an icon.
+  depKeep: string[];
   seedStories: string[];
   rootScripts: Record<string, string>;
   devDeps: Record<string, string>;

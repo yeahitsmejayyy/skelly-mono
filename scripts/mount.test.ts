@@ -132,10 +132,34 @@ test("the slug reaches the db filename but never a package name", () => {
   for (const op of pkgNames) expect(op.kind === "replace" && op.to).not.toContain("belltax");
 });
 
-test("every app's own bun.lock is purged", () => {
+test("every app's own bun.lock is purged, and so is the shell's", () => {
   const p = plan(FOUR, M);
+  for (const dir of ["server", "portal", "admin", "site"]) {
+    expect(p.ops).toContainEqual({ kind: "purge", path: `apps/${dir}/bun.lock` });
+  }
+  // The shell's lockfile describes a workspace with no members; it is stale once apps exist.
+  expect(p.ops).toContainEqual({ kind: "purge", path: "bun.lock" });
   const locks = p.ops.filter((o) => o.kind === "purge" && o.path.endsWith("bun.lock"));
-  expect(locks).toHaveLength(4);
+  expect(locks).toHaveLength(5);
+});
+
+// The compiler is a one-shot composition step that must never run twice, and mono.json lists
+// another project's repositories. Both go, last, after every op that reads the manifest.
+test("the compiler removes itself, and only after everything else", () => {
+  const ops = plan(FOUR, M).ops;
+  for (const path of ["mono.json", "scripts/mount.ts", "scripts/mount", "scripts/mount.test.ts"]) {
+    const i = ops.findIndex((o) => o.kind === "purge" && o.path === path);
+    expect(i).toBeGreaterThan(-1);
+    expect(i).toBeGreaterThan(ops.length - 1 - 4 - 1);
+  }
+  // The two scripts the mounted project still needs are never purged.
+  for (const keep of ["scripts/sync-types.ts", "scripts/typecheck.ts"]) {
+    expect(ops).not.toContainEqual({ kind: "purge", path: keep });
+  }
+  // And `bun run mount` goes with it, rather than pointing at a file that is gone.
+  expect(ops).toContainEqual({
+    kind: "jsonUnset", file: "package.json", path: ["scripts", "mount"],
+  });
 });
 
 test("the portal's own sync-types script is purged and its script dropped", () => {
@@ -148,8 +172,17 @@ test("the portal's own sync-types script is purged and its script dropped", () =
 
 test("the app keeps dev, build and typecheck", () => {
   const p = plan(FOUR, M);
-  const dropped = p.ops.filter((o) => o.kind === "jsonUnset" && o.path[0] === "scripts");
+  // Only the portal's sync:types is dropped from an app — the root owns that job now. Nothing
+  // may take dev, build or typecheck off an app.
+  const dropped = p.ops.filter(
+    (o) => o.kind === "jsonUnset" && o.path[0] === "scripts" && o.file.startsWith("apps/"),
+  );
   for (const op of dropped) expect(op.kind === "jsonUnset" && op.path[1]).toBe("sync:types");
+  // At the root, `mount` is the only script the mount removes.
+  const atRoot = p.ops.filter(
+    (o) => o.kind === "jsonUnset" && o.path[0] === "scripts" && o.file === "package.json",
+  );
+  expect(atRoot.map((o) => (o.kind === "jsonUnset" ? o.path[1] : ""))).toEqual(["mount"]);
 });
 
 test("the shell sheds its own identity files", () => {
@@ -187,14 +220,79 @@ test("every frontend gets the Tailwind @source line", () => {
 
 test("the moved deps leave every frontend and @app/ui is added", () => {
   const p = plan(FOUR, M);
+  const { depMoves, depKeep } = M.designSystem;
+  const moved = Object.keys(depMoves).filter((d) => !depKeep.includes(d));
+  expect(moved.length).toBeGreaterThan(0);
   for (const dir of ["portal", "admin", "site"]) {
-    expect(p.ops).toContainEqual({
-      kind: "jsonUnset", file: `apps/${dir}/package.json`, path: ["dependencies", "lucide-react"],
-    });
+    for (const dep of moved) {
+      expect(p.ops).toContainEqual({
+        kind: "jsonUnset", file: `apps/${dir}/package.json`, path: ["dependencies", dep],
+      });
+    }
     expect(p.ops).toContainEqual({
       kind: "jsonSet", file: `apps/${dir}/package.json`,
       path: ["dependencies", "@app/ui"], value: "workspace:*",
     });
+  }
+});
+
+// A dep in depKeep is in packages/ui's dependencies AND still on every frontend. Taking it off
+// the frontends breaks their own code: lucide-react is imported by twenty app files.
+test("a dep in depKeep is never unset from a frontend", () => {
+  const p = plan(FOUR, M);
+  const { depKeep } = M.designSystem;
+  expect(depKeep.length).toBeGreaterThan(0);
+  for (const dep of depKeep) {
+    expect(p.ops).not.toContainEqual(
+      expect.objectContaining({ kind: "jsonUnset", path: ["dependencies", dep] }),
+    );
+    const pkg = p.ops.find((o) => o.kind === "write" && o.file === "packages/ui/package.json");
+    const deps = JSON.parse((pkg as { content: string }).content).dependencies as Record<string, string>;
+    expect(Object.keys(deps)).toContain(dep);
+  }
+});
+
+// The extracted files move out of the app tree, so the apps' own rewrites never reach them.
+test("packages/ui's own imports are rewritten too", () => {
+  const p = plan(FOUR, M);
+  for (const r of M.designSystem.pkgImportRewrites) {
+    expect(p.ops).toContainEqual({
+      kind: "importRewrite", dir: "packages/ui/src", from: r.from, to: r.to,
+    });
+  }
+});
+
+// One frontend's copy is moved into packages/ui; the others' copies are dead files that still
+// import deps the mount has just removed from their package.json.
+test("every frontend but the extraction source has its moved files purged", () => {
+  const p = plan(FOUR, M);
+  const moves = p.ops.filter((o) => o.kind === "moveFile");
+  expect(moves.length).toBe(M.designSystem.extract.files.length);
+  for (const f of M.designSystem.extract.files) {
+    const source = moves.find((o) => o.kind === "moveFile" && o.to === f.to);
+    expect(source).toBeDefined();
+    for (const dir of ["portal", "admin", "site"]) {
+      const path = `apps/${dir}/${f.from}`;
+      const isSource = source!.kind === "moveFile" && source!.from === path;
+      expect(p.ops).toContainEqual(
+        isSource
+          ? { kind: "moveFile", from: path, to: f.to }
+          : { kind: "purge", path },
+      );
+    }
+  }
+});
+
+// "../ui/" contains "./ui/", so without the quote anchor the order of importRewrites would
+// silently decide whether the result is correct. No pattern may contain another.
+test("no importRewrite pattern is a substring of another", () => {
+  const all = [...M.designSystem.importRewrites, ...M.designSystem.pkgImportRewrites];
+  for (const a of all) {
+    for (const b of all) {
+      if (a === b || a.from === b.from) continue;
+      expect({ a: a.from, b: b.from, contains: a.from.includes(b.from) })
+        .toEqual({ a: a.from, b: b.from, contains: false });
+    }
   }
 });
 
@@ -536,4 +634,82 @@ test("splitCss reports a block that mono.json routes nowhere instead of dropping
 test("an op whose path escapes the root aborts the mount rather than writing outside it", async () => {
   const root = sandbox();
   await expect(apply([{ kind: "purge", path: "../../etc/hosts" }], root)).rejects.toThrow(MountError);
+});
+
+// Every dep an extracted component imports must be declared by packages/ui, or the package is
+// broken the moment it is installed. This is the check that would have caught `motion` without a
+// full mount: it reads the templates directly. Skips when no sibling checkout is present.
+const TEMPLATE_DIRS = ["skelly-admin", "skelly-portal", "skelly-site"]
+  .map((d) => resolve(dirname(import.meta.dir), "..", d))
+  .filter((d) => existsSync(join(d, "src/components/ui")));
+
+test.skipIf(TEMPLATE_DIRS.length === 0)(
+  "every dep the extracted components import is declared by packages/ui",
+  async () => {
+    const ds = M.designSystem;
+    // The root rig supplies Storybook's types to the seed stories; react-dom is a peer.
+    const fromRoot = new Set(["react", "react-dom", "@storybook/react-vite"]);
+    const declared = new Set([
+      ...Object.keys(ds.depMoves), ...Object.keys(ds.peerDeps), ...fromRoot,
+    ]);
+    const bare = /from\s+"([^"./][^"]*)"/g;
+    const missing = new Map<string, string>();
+    const unrewritten = new Map<string, string>();
+    for (const dir of TEMPLATE_DIRS) {
+      for (const name of ds.extract.components) {
+        const file = join(dir, ds.extract.from, name);
+        if (!existsSync(file)) continue;
+        const where = `${name} in ${dir.split("/").pop()}`;
+        for (const m of (await Bun.file(file).text()).matchAll(bare)) {
+          const spec = m[1]!;
+          // "@/..." is a path alias into the app's own tree, not a package. It has to be covered
+          // by a pkgImportRewrite or the extracted file carries a dangling import.
+          if (spec.startsWith("@/")) {
+            if (!ds.pkgImportRewrites.some((r) => spec.startsWith(r.from))) unrewritten.set(spec, where);
+            continue;
+          }
+          const pkg = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!;
+          if (!declared.has(pkg)) missing.set(pkg, where);
+        }
+      }
+    }
+    expect({
+      undeclaredDeps: Object.fromEntries(missing),
+      aliasesNoRewriteCovers: Object.fromEntries(unrewritten),
+    }).toEqual({ undeclaredDeps: {}, aliasesNoRewriteCovers: {} });
+  },
+);
+
+// bun --filter runs a script where it exists and says nothing where it does not, so a workspace
+// with no `typecheck` script is skipped in silence by the root gate. Every mounted app must have
+// one, whether its template shipped it or appScriptsSet adds it.
+test("every container ends up with a typecheck script", () => {
+  const p = plan(FOUR, M);
+  const byId = new Map(M.containers.map((c) => [c.id, c]));
+  const TEMPLATE_HAS = new Set(["portal"]); // the portal template ships its own
+  for (const i of FOUR.instances) {
+    if (TEMPLATE_HAS.has(i.id)) continue;
+    expect(byId.get(i.id)!.appScriptsSet.typecheck).toBeDefined();
+    expect(p.ops).toContainEqual({
+      kind: "jsonSet", file: `apps/${i.dir}/package.json`, path: ["scripts", "typecheck"],
+      value: byId.get(i.id)!.appScriptsSet.typecheck,
+    });
+  }
+});
+
+// .storybook/preview.tsx and the seed stories live at the root and in packages/ui, and both
+// import react. The root declares no react of its own — the apps do — so Vite cannot resolve
+// react/jsx-dev-runtime for the Storybook rig unless the rig's devDeps bring it.
+test("the Storybook rig's root devDeps cover what its own files import", () => {
+  const p = plan(FOUR, M);
+  const added = new Set(
+    p.ops.flatMap((o) =>
+      o.kind === "jsonSet" && o.file === "package.json" && o.path[0] === "devDependencies"
+        ? [o.path[1]!]
+        : [],
+    ),
+  );
+  for (const dep of ["react", "react-dom", "@types/react", "@storybook/react-vite", "vitest"]) {
+    expect([...added]).toContain(dep);
+  }
 });

@@ -120,7 +120,7 @@
       "source": "src/index.css",
       "theme": "packages/ui/src/theme.css",
       "tokens": "packages/ui/src/tokens.css",
-      "themeHolds": ["@custom-variant dark", "@theme inline"],
+      "themeHolds": ["@custom-variant dark", "@theme inline", "@layer base"],
       "tokensHolds": [":root", ".dark"]
     },
     "importRewrites": [

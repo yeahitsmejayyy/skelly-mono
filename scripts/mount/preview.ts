@@ -7,10 +7,13 @@ export function preview(p: MountPlan, answers: Answers): string {
     (o) => o.kind === "jsonSet" && o.file === "package.json" && o.path[0] === "scripts",
   );
   out.push("Root scripts:");
-  for (const s of scripts) {
-    if (s.kind !== "jsonSet") continue;
-    out.push(`  bun run ${s.path[1]}  →  ${String(s.value)}`);
-  }
+  // Padded to the widest name, like the tree, so the arrows form a column.
+  const names = scripts.map((s) => (s.kind === "jsonSet" ? String(s.path[1]) : ""));
+  const nameW = Math.max(0, ...names.map((n) => n.length));
+  scripts.forEach((s, n) => {
+    if (s.kind !== "jsonSet") return;
+    out.push(`  bun run ${names[n]!.padEnd(nameW)}  →  ${String(s.value)}`);
+  });
   const clones = p.ops.filter((o) => o.kind === "clone").length;
   out.push("", `${clones} repositories will be cloned, ${p.ops.length} operations in all.`);
   out.push(answers.designSystem
